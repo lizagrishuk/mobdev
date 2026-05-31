@@ -10,6 +10,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -17,6 +18,7 @@ import io.github.mobdev.ui.ChatsScreen
 import io.github.mobdev.ui.ImageScreen
 import io.github.mobdev.ui.LoginScreen
 import io.github.mobdev.ui.MessagesScreen
+import io.github.mobdev.ui.LandscapeScreen
 import io.github.mobdev.viewmodel.ChatViewModel
 
 class MainActivity : ComponentActivity() {
@@ -40,8 +42,9 @@ fun ChatApp(viewModel: ChatViewModel) {
     val navController = rememberNavController()
     val token by viewModel.token.collectAsState()
     val error by viewModel.error.collectAsState()
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
 
-    // если 401 - возвращаем на логин
     LaunchedEffect(error) {
         if (error == "401") {
             navController.navigate("login") {
@@ -66,32 +69,66 @@ fun ChatApp(viewModel: ChatViewModel) {
             )
         }
         composable("chats") {
-            ChatsScreen(
-                viewModel = viewModel,
-                onChatClick = { channel ->
-                    viewModel.selectChannel(channel)
-                    navController.navigate("messages/$channel")
-                },
-                onLogout = {
-                    viewModel.logout {
-                        navController.navigate("login") {
-                            popUpTo(0)
+            if (isLandscape) {
+                LandscapeScreen(
+                    viewModel = viewModel,
+                    onImageClick = { link ->
+                        val encoded = java.net.URLEncoder.encode(link, "UTF-8")
+                        navController.navigate("image/$encoded")
+                    },
+                    onLogout = {
+                        viewModel.logout {
+                            navController.navigate("login") {
+                                popUpTo(0)
+                            }
                         }
                     }
-                }
-            )
+                )
+            } else {
+                ChatsScreen(
+                    viewModel = viewModel,
+                    onChatClick = { channel ->
+                        viewModel.selectChannel(channel)
+                        navController.navigate("messages/$channel")
+                    },
+                    onLogout = {
+                        viewModel.logout {
+                            navController.navigate("login") {
+                                popUpTo(0)
+                            }
+                        }
+                    }
+                )
+            }
         }
         composable("messages/{channel}") { backStackEntry ->
             val channel = backStackEntry.arguments?.getString("channel") ?: ""
-            MessagesScreen(
-                viewModel = viewModel,
-                channelName = channel,
-                onBack = { navController.popBackStack() },
-                onImageClick = { link ->
-                    val encoded = java.net.URLEncoder.encode(link, "UTF-8")
-                    navController.navigate("image/$encoded")
-                }
-            )
+            if (isLandscape) {
+                LandscapeScreen(
+                    viewModel = viewModel,
+                    onImageClick = { link ->
+                        val encoded = java.net.URLEncoder.encode(link, "UTF-8")
+                        navController.navigate("image/$encoded")
+                    },
+                    onLogout = {
+                        viewModel.logout {
+                            navController.navigate("login") {
+                                popUpTo(0)
+                            }
+                        }
+                    }
+                )
+            } else {
+                MessagesScreen(
+                    viewModel = viewModel,
+                    channelName = channel,
+                    onBack = { navController.popBackStack() },
+                    onImageClick = { link ->
+                        val encoded = java.net.URLEncoder.encode(link, "UTF-8")
+                        navController.navigate("image/$encoded")
+                    }
+                )
+            }
         }
         composable("image/{link}") { backStackEntry ->
             val link = java.net.URLDecoder.decode(

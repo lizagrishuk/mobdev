@@ -34,6 +34,12 @@ class ChatViewModel : ViewModel() {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
 
+    private val _isLoadingMore = MutableStateFlow(false)
+    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore
+
+    private val _hasMoreMessages = MutableStateFlow(true)
+    val hasMoreMessages: StateFlow<Boolean> = _hasMoreMessages
+
     fun login(name: String, password: String, onSuccess: () -> Unit) {
         viewModelScope.launch {
             _isLoading.value = true
@@ -63,6 +69,8 @@ class ChatViewModel : ViewModel() {
     }
 
     fun loadChannels() {
+        // не загружаем если уже есть данные - защита от повторной загрузки при повороте
+        if (_channels.value.isNotEmpty()) return
         val currentToken = _token.value ?: return
         viewModelScope.launch {
             _isLoading.value = true
@@ -81,30 +89,26 @@ class ChatViewModel : ViewModel() {
     }
 
     fun selectChannel(channel: String) {
+        // если тот же канал уже выбран - не перезагружаем
+        if (_selectedChannel.value == channel && _messages.value.isNotEmpty()) return
         _selectedChannel.value = channel
+        _messages.value = emptyList()
+        _hasMoreMessages.value = true
         loadMessages(channel)
     }
 
     fun loadMessages(channel: String) {
+        // не загружаем если уже есть данные - защита от повторной загрузки при повороте
+        if (_messages.value.isNotEmpty()) return
         val currentToken = _token.value ?: return
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                var lastId = "0"
-                var allMessages = emptyList<Message>()
-
-                // идём вперёд пока не кончатся сообщения
-                while (true) {
-                    val batch = RetrofitClient.api.getMessages(
-                        currentToken, channel, limit = 20, lastKnownId = lastId
-                    )
-                    if (batch.isEmpty()) break
-                    allMessages = batch
-                    lastId = batch.maxOf { it.id }.toString()
-                    if (batch.size < 20) break
-                }
-
-                _messages.value = allMessages
+                val result = RetrofitClient.api.getMessages(
+                    currentToken, channel, limit = 20, lastKnownId = "0"
+                )
+                _messages.value = result
+                _hasMoreMessages.value = result.size >= 20
                 _error.value = null
             } catch (e: retrofit2.HttpException) {
                 if (e.code() == 401) _error.value = "401"
@@ -113,6 +117,34 @@ class ChatViewModel : ViewModel() {
                 _error.value = "Ошибка подключения"
             } finally {
                 _isLoading.value = false
+            }
+        }
+    }
+
+    fun loadMoreMessages() {
+        // подгружаем следующие 20 при скролле вверх
+        if (_isLoadingMore.value || !_hasMoreMessages.value) return
+        val currentToken = _token.value ?: return
+        val currentChannel = _selectedChannel.value ?: return
+        val lastId = _messages.value.maxOfOrNull { it.id } ?: return
+        viewModelScope.launch {
+            _isLoadingMore.value = true
+            try {
+                val result = RetrofitClient.api.getMessages(
+                    currentToken, currentChannel, limit = 20, lastKnownId = lastId.toString()
+                )
+                if (result.isEmpty()) {
+                    _hasMoreMessages.value = false
+                } else {
+                    _messages.value = _messages.value + result
+                    _hasMoreMessages.value = result.size >= 20
+                }
+            } catch (e: retrofit2.HttpException) {
+                if (e.code() == 401) _error.value = "401"
+            } catch (e: Exception) {
+                _error.value = "Ошибка подключения"
+            } finally {
+                _isLoadingMore.value = false
             }
         }
     }
@@ -131,7 +163,11 @@ class ChatViewModel : ViewModel() {
                         data = MessageData(Text = TextData(text))
                     )
                 )
-                loadMessages(currentChannel)
+                // после отправки загружаем свежие сообщения принудительно
+                val result = RetrofitClient.api.getMessages(
+                    currentToken, currentChannel, limit = 20, lastKnownId = "0"
+                )
+                _messages.value = result
             } catch (e: retrofit2.HttpException) {
                 if (e.code() == 401) _error.value = "401"
                 else _error.value = "Ошибка отправки"

@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -27,10 +28,20 @@ fun MessagesScreen(
 ) {
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val isLoadingMore by viewModel.isLoadingMore.collectAsState()
+    val hasMoreMessages by viewModel.hasMoreMessages.collectAsState()
     var messageText by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
 
     LaunchedEffect(channelName) {
         viewModel.loadMessages(channelName)
+    }
+
+    // подгружаем ещё когда доскроллили до верха
+    LaunchedEffect(listState.firstVisibleItemIndex) {
+        if (listState.firstVisibleItemIndex == 0 && hasMoreMessages && !isLoadingMore) {
+            viewModel.loadMoreMessages()
+        }
     }
 
     Scaffold(
@@ -53,13 +64,13 @@ fun MessagesScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // список сообщений занимает всё место кроме поля ввода
             Box(modifier = Modifier.weight(1f)) {
                 if (isLoading && messages.isEmpty()) {
                     CircularProgressIndicator(modifier = Modifier.padding(16.dp))
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
+                        state = listState,
                         reverseLayout = true
                     ) {
                         items(messages.reversed()) { message ->
@@ -89,11 +100,21 @@ fun MessagesScreen(
                                 }
                             }
                         }
+                        // индикатор загрузки вверху списка
+                        if (isLoadingMore) {
+                            item {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // поле ввода всегда внизу
             HorizontalDivider()
             Row(
                 modifier = Modifier
