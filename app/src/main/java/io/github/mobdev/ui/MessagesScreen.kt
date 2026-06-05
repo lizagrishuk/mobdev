@@ -30,6 +30,23 @@ fun MessagesScreen(
     val isLoading by viewModel.isLoading.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
     val hasMoreMessages by viewModel.hasMoreMessages.collectAsState()
+    val error by viewModel.error.collectAsState()
+
+// диалог ошибки
+    error?.let { msg ->
+        if (msg != "401") {
+            AlertDialog(
+                onDismissRequest = { viewModel.clearError() },
+                title = { Text(stringResource(R.string.error_title)) },
+                text = { Text(msg) },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.clearError() }) {
+                        Text(stringResource(R.string.ok))
+                    }
+                }
+            )
+        }
+    }
     var messageText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 

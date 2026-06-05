@@ -29,6 +29,23 @@ fun LandscapeScreen(
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     var messageText by remember { mutableStateOf("") }
+    val error by viewModel.error.collectAsState()
+
+// диалог ошибки
+    error?.let { msg ->
+        if (msg != "401") {
+            AlertDialog(
+                onDismissRequest = { viewModel.clearError() },
+                title = { Text(stringResource(R.string.error_title)) },
+                text = { Text(msg) },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.clearError() }) {
+                        Text(stringResource(R.string.ok))
+                    }
+                }
+            )
+        }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.loadChannels()

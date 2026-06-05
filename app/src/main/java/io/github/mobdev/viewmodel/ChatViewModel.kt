@@ -1,7 +1,13 @@
 package io.github.mobdev.viewmodel
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.mobdev.db.AppDatabase
+import io.github.mobdev.db.MessageEntity
 import io.github.mobdev.network.Message
 import io.github.mobdev.network.MessageData
 import io.github.mobdev.network.RetrofitClient
@@ -11,7 +17,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-class ChatViewModel : ViewModel() {
+class ChatViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val db = AppDatabase.getInstance(application)
+    private val dao = db.messageDao()
+    private val connectivityManager =
+        application.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     private val _token = MutableStateFlow<String?>(null)
     val token: StateFlow<String?> = _token
@@ -39,6 +50,15 @@ class ChatViewModel : ViewModel() {
 
     private val _hasMoreMessages = MutableStateFlow(true)
     val hasMoreMessages: StateFlow<Boolean> = _hasMoreMessages
+
+    private val _isOnline = MutableStateFlow(true)
+    val isOnline: StateFlow<Boolean> = _isOnline
+
+    private fun isNetworkAvailable(): Boolean {
+        val network = connectivityManager.activeNetwork ?: return false
+        val caps = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
 
     fun login(name: String, password: String, onSuccess: () -> Unit) {
         viewModelScope.launch {
@@ -69,27 +89,31 @@ class ChatViewModel : ViewModel() {
     }
 
     fun loadChannels() {
-        // не загружаем если уже есть данные - защита от повторной загрузки при повороте
         if (_channels.value.isNotEmpty()) return
-        val currentToken = _token.value ?: return
         viewModelScope.launch {
             _isLoading.value = true
-            try {
-                _channels.value = RetrofitClient.api.getChannels(currentToken)
-                _error.value = null
-            } catch (e: retrofit2.HttpException) {
-                if (e.code() == 401) _error.value = "401"
-                else _error.value = "Ошибка загрузки каналов"
-            } catch (e: Exception) {
-                _error.value = "Ошибка подключения"
-            } finally {
-                _isLoading.value = false
+            if (isNetworkAvailable()) {
+                try {
+                    val currentToken = _token.value ?: return@launch
+                    _channels.value = RetrofitClient.api.getChannels(currentToken)
+                    _isOnline.value = true
+                    _error.value = null
+                } catch (e: retrofit2.HttpException) {
+                    if (e.code() == 401) _error.value = "401"
+                    else _error.value = "Ошибка загрузки каналов"
+                } catch (e: Exception) {
+                    _isOnline.value = false
+                    _error.value = "Нет подключения к сети"
+                }
+            } else {
+                _isOnline.value = false
+                _error.value = "Нет подключения к сети"
             }
+            _isLoading.value = false
         }
     }
 
     fun selectChannel(channel: String) {
-        // если тот же канал уже выбран - не перезагружаем
         if (_selectedChannel.value == channel && _messages.value.isNotEmpty()) return
         _selectedChannel.value = channel
         _messages.value = emptyList()
@@ -98,38 +122,63 @@ class ChatViewModel : ViewModel() {
     }
 
     fun loadMessages(channel: String) {
-        // не загружаем если уже есть данные - защита от повторной загрузки при повороте
         if (_messages.value.isNotEmpty()) return
-        val currentToken = _token.value ?: return
         viewModelScope.launch {
             _isLoading.value = true
-            try {
-                val result = RetrofitClient.api.getMessages(
-                    currentToken, channel, limit = 20, lastKnownId = "0"
-                )
-                _messages.value = result
-                _hasMoreMessages.value = result.size >= 20
-                _error.value = null
-            } catch (e: retrofit2.HttpException) {
-                if (e.code() == 401) _error.value = "401"
-                else _error.value = "Ошибка загрузки сообщений"
-            } catch (e: Exception) {
-                _error.value = "Ошибка подключения"
-            } finally {
-                _isLoading.value = false
+
+            val cached = dao.getMessages(channel)
+            if (cached.isNotEmpty()) {
+                _messages.value = cached.map { it.toMessage() }
             }
+
+            if (isNetworkAvailable()) {
+                try {
+                    val currentToken = _token.value ?: return@launch
+                    var lastId = "0"
+                    var allMessages = emptyList<Message>()
+                    while (true) {
+                        val batch = RetrofitClient.api.getMessages(
+                            currentToken, channel, limit = 20, lastKnownId = lastId
+                        )
+                        if (batch.isEmpty()) break
+                        allMessages = allMessages + batch
+                        lastId = batch.maxOf { it.id }.toString()
+                        if (batch.size < 20) break
+                    }
+                    if (allMessages.isNotEmpty()) {
+                        _messages.value = allMessages
+                        dao.insertMessages(allMessages.map { it.toEntity(channel) })
+                    }
+                    _isOnline.value = true
+                    _error.value = null
+                } catch (e: retrofit2.HttpException) {
+                    if (e.code() == 401) _error.value = "401"
+                    else _error.value = "Ошибка загрузки сообщений"
+                } catch (e: Exception) {
+                    _isOnline.value = false
+                    if (_messages.value.isEmpty()) {
+                        _error.value = "Нет подключения, показаны кэшированные данные"
+                    }
+                }
+            } else {
+                _isOnline.value = false
+                if (_messages.value.isEmpty()) {
+                    _error.value = "Нет подключения к сети"
+                }
+            }
+            _isLoading.value = false
         }
     }
 
     fun loadMoreMessages() {
-        // подгружаем следующие 20 при скролле вверх
         if (_isLoadingMore.value || !_hasMoreMessages.value) return
-        val currentToken = _token.value ?: return
         val currentChannel = _selectedChannel.value ?: return
+        if (!isNetworkAvailable()) return
         val lastId = _messages.value.maxOfOrNull { it.id } ?: return
         viewModelScope.launch {
             _isLoadingMore.value = true
             try {
+                val currentToken = _token.value ?: return@launch
                 val result = RetrofitClient.api.getMessages(
                     currentToken, currentChannel, limit = 20, lastKnownId = lastId.toString()
                 )
@@ -138,11 +187,10 @@ class ChatViewModel : ViewModel() {
                 } else {
                     _messages.value = _messages.value + result
                     _hasMoreMessages.value = result.size >= 20
+                    dao.insertMessages(result.map { it.toEntity(currentChannel) })
                 }
-            } catch (e: retrofit2.HttpException) {
-                if (e.code() == 401) _error.value = "401"
             } catch (e: Exception) {
-                _error.value = "Ошибка подключения"
+                _isOnline.value = false
             } finally {
                 _isLoadingMore.value = false
             }
@@ -150,6 +198,10 @@ class ChatViewModel : ViewModel() {
     }
 
     fun sendMessage(text: String) {
+        if (!isNetworkAvailable()) {
+            _error.value = "Нет подключения — отправка недоступна"
+            return
+        }
         val currentToken = _token.value ?: return
         val currentChannel = _selectedChannel.value ?: return
         val currentUsername = _username.value
@@ -163,11 +215,21 @@ class ChatViewModel : ViewModel() {
                         data = MessageData(Text = TextData(text))
                     )
                 )
-                // после отправки загружаем свежие сообщения принудительно
-                val result = RetrofitClient.api.getMessages(
-                    currentToken, currentChannel, limit = 20, lastKnownId = "0"
-                )
-                _messages.value = result
+                var lastId = "0"
+                var allMessages = emptyList<Message>()
+                while (true) {
+                    val batch = RetrofitClient.api.getMessages(
+                        currentToken, currentChannel, limit = 20, lastKnownId = lastId
+                    )
+                    if (batch.isEmpty()) break
+                    allMessages = allMessages + batch
+                    lastId = batch.maxOf { it.id }.toString()
+                    if (batch.size < 20) break
+                }
+                if (allMessages.isNotEmpty()) {
+                    _messages.value = allMessages
+                    dao.insertMessages(allMessages.map { it.toEntity(currentChannel) })
+                }
             } catch (e: retrofit2.HttpException) {
                 if (e.code() == 401) _error.value = "401"
                 else _error.value = "Ошибка отправки"
@@ -183,7 +245,7 @@ class ChatViewModel : ViewModel() {
             try {
                 RetrofitClient.api.logout(currentToken)
             } catch (e: Exception) {
-                // игнорируем ошибки при выходе
+                // игнорируем
             } finally {
                 _token.value = null
                 _username.value = ""
@@ -198,4 +260,41 @@ class ChatViewModel : ViewModel() {
     fun clearError() {
         _error.value = null
     }
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: android.net.Network) {
+            val channel = _selectedChannel.value ?: return
+            _messages.value = emptyList()
+            loadMessages(channel)
+        }
+    }
+
+    init {
+        connectivityManager.registerDefaultNetworkCallback(networkCallback)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        connectivityManager.unregisterNetworkCallback(networkCallback)
+    }
 }
+
+private fun Message.toEntity(channel: String) = MessageEntity(
+    id = id,
+    channelName = channel,
+    fromUser = from,
+    textContent = data.Text?.text,
+    imageLink = data.Image?.link,
+    time = time
+)
+
+private fun MessageEntity.toMessage() = Message(
+    id = id,
+    from = fromUser,
+    to = channelName,
+    data = io.github.mobdev.network.MessageData(
+        Text = textContent?.let { io.github.mobdev.network.TextData(it) },
+        Image = imageLink?.let { io.github.mobdev.network.ImageData(it) }
+    ),
+    time = time
+)
